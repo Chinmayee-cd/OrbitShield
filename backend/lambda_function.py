@@ -7,85 +7,75 @@ def haversine(lat1, lon1, lat2, lon2):
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lon2 - lon1)
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
-    c = 2*math.atan2(math.sqrt(a), math.sqrt(1-a))
-    return R * c
-
-CORS_HEADERS = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': '*',
-    'Access-Control-Allow-Methods': '*'
-}
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 def lambda_handler(event, context):
-    if event.get('requestContext', {}).get('http', {}).get('method', '') == 'OPTIONS':
-        return {'statusCode': 200, 'headers': CORS_HEADERS, 'body': ''}
-    if event.get('httpMethod') == 'OPTIONS':
-        return {'statusCode': 200, 'headers': CORS_HEADERS, 'body': ''}
+    http_method = event.get('requestContext', {}).get('http', {}).get('method', event.get('httpMethod', 'GET'))
+
+    # Handle OPTIONS preflight — no manual CORS headers; Function URL config handles them
+    if http_method == 'OPTIONS':
+        return {'statusCode': 200, 'body': ''}
 
     try:
-        body = json.loads(event.get('body', '{}'))
-    except Exception:
-        return {'statusCode': 400, 'headers': CORS_HEADERS, 'body': json.dumps({'error': 'Invalid JSON'})}
+        body = event.get('body', '{}')
+        if isinstance(body, str):
+            params = json.loads(body)
+        else:
+            params = body
 
-    disaster_title = body.get('disasterTitle', 'Unknown')
-    category = body.get('category', 'Unknown')
-    disaster_lat = float(body.get('disasterLat', 0))
-    disaster_lon = float(body.get('disasterLon', 0))
-    sat_name = body.get('satName', 'Unknown')
-    sat_lat = float(body.get('satLat', 0))
-    sat_lon = float(body.get('satLon', 0))
-    sat_alt = float(body.get('satAlt', 0))
+        disaster_lat = float(params.get('disasterLat', 0))
+        disaster_lon = float(params.get('disasterLon', 0))
+        sat_lat = float(params.get('satLat', 0))
+        sat_lon = float(params.get('satLon', 0))
+        sat_alt = float(params.get('satAlt', 500))
+        category = params.get('category', 'Unknown')
+        sat_name = params.get('satName', 'Unknown')
+        disaster_title = params.get('disasterTitle', 'Unknown')
 
-    ground_distance_km = round(haversine(disaster_lat, disaster_lon, sat_lat, sat_lon), 2)
-    estimated_intercept_min = round(ground_distance_km / (7.5 * 60), 2)
+        ground_dist = haversine(disaster_lat, disaster_lon, sat_lat, sat_lon)
+        intercept_min = ground_dist / (7.5 * 60)
 
-    if ground_distance_km < 500:
-        imaging_lock_status = 'LOCKED'
-    elif ground_distance_km < 1500:
-        imaging_lock_status = 'ACQUIRING'
-    else:
-        imaging_lock_status = 'OUT_OF_RANGE'
+        if ground_dist < 500:
+            imaging_lock = 'LOCKED'
+        elif ground_dist < 1500:
+            imaging_lock = 'ACQUIRING'
+        else:
+            imaging_lock = 'OUT_OF_RANGE'
 
-    sensor_map = {
-        'Wildfires': 'SWIR+Thermal',
-        'Volcanoes': 'Multispectral+TIR',
-        'Severe Storms': 'SAR+Optical',
-        'Floods': 'SAR+Multispectral'
-    }
-    recommended_sensor_mode = sensor_map.get(category, 'Optical+NIR')
+        sensor_map = {
+            'Wildfires': 'SWIR+Thermal',
+            'Volcanoes': 'Multispectral+TIR',
+            'Severe Storms': 'SAR+Optical',
+            'Floods': 'SAR+Multispectral'
+        }
+        sensor_mode = sensor_map.get(category, 'Optical+NIR')
 
-    priority_score = min(99, max(55, int(99 - (ground_distance_km / 50))))
+        priority = min(99, max(55, round(99 - (ground_dist / 50))))
 
-    action_brief_map = {
-        'LOCKED': [
-            f'Initiate high-resolution imaging pass over {disaster_title}',
-            f'Deploy {recommended_sensor_mode} sensor array at full gain',
-            'Transmit imagery to ground station within current overpass window'
-        ],
-        'ACQUIRING': [
-            f'Slew {sat_name} to acquire lock on {disaster_title} zone',
-            f'Pre-configure {recommended_sensor_mode} sensors for imminent capture',
-            'Alert ground team: imaging window opens in ~' + str(estimated_intercept_min) + ' min'
-        ],
-        'OUT_OF_RANGE': [
-            f'Track {disaster_title}: target is outside current imaging range',
-            f'Schedule {sat_name} retasking for next orbital pass',
-            f'Estimated time to intercept range: {estimated_intercept_min} min — standby'
+        action_brief = [
+            f'Deploy {sensor_mode} sensor suite for {category} monitoring',
+            f'Initiate overpass sequence — ETA {intercept_min:.1f} min at current orbital velocity',
+            'Begin high-resolution capture sequence' if imaging_lock == 'LOCKED'
+            else 'Adjust attitude for optimal imaging geometry' if imaging_lock == 'ACQUIRING'
+            else 'Relay tasking to next available overpass window'
         ]
-    }
-    action_brief = action_brief_map.get(imaging_lock_status, action_brief_map['OUT_OF_RANGE'])
 
-    result = {
-        'groundDistanceKm': ground_distance_km,
-        'estimatedInterceptMin': estimated_intercept_min,
-        'imagingLockStatus': imaging_lock_status,
-        'recommendedSensorMode': recommended_sensor_mode,
-        'priorityScore': priority_score,
-        'actionBrief': action_brief
-    }
+        result = {
+            'groundDistanceKm': round(ground_dist, 2),
+            'estimatedInterceptMin': round(intercept_min, 2),
+            'imagingLockStatus': imaging_lock,
+            'recommendedSensorMode': sensor_mode,
+            'priorityScore': priority,
+            'actionBrief': action_brief
+        }
 
-    return {
-        'statusCode': 200,
-        'headers': CORS_HEADERS,
-        'body': json.dumps(result)
-    }
+        return {
+            'statusCode': 200,
+            'body': json.dumps(result)
+        }
+
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'body': json.dumps({'error': str(e)})
+        }
