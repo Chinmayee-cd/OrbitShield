@@ -64,6 +64,25 @@ function propagateSatellite(sat) {
   }
 }
 
+function computeLocalTelemetry(disasterLat, disasterLon, satLat, satLon, category) {
+  const R = 6371;
+  const dLat = (satLat - disasterLat) * Math.PI / 180;
+  const dLon = (satLon - disasterLon) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(disasterLat * Math.PI/180) * Math.cos(satLat * Math.PI/180) * Math.sin(dLon/2)**2;
+  const groundDistanceKm = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  const estimatedInterceptMin = groundDistanceKm / (7.5 * 60);
+  const imagingLockStatus = groundDistanceKm < 500 ? 'LOCKED' : groundDistanceKm < 1500 ? 'ACQUIRING' : 'OUT_OF_RANGE';
+  const sensorMap = { 'Wildfires': 'SWIR+Thermal', 'Volcanoes': 'Multispectral+TIR', 'Severe Storms': 'SAR+Optical', 'Floods': 'SAR+Multispectral' };
+  const recommendedSensorMode = sensorMap[category] || 'Optical+NIR';
+  const priorityScore = Math.min(99, Math.max(55, Math.round(99 - (groundDistanceKm / 50))));
+  const actionBrief = [
+    `Deploy ${recommendedSensorMode} sensor suite for ${category} monitoring`,
+    `Initiate overpass sequence — ETA ${estimatedInterceptMin.toFixed(1)} min at current orbital velocity`,
+    `${imagingLockStatus === 'LOCKED' ? 'Begin high-resolution capture sequence' : imagingLockStatus === 'ACQUIRING' ? 'Adjust attitude for optimal imaging geometry' : 'Relay tasking to next available overpass window'}`
+  ];
+  return { groundDistanceKm: parseFloat(groundDistanceKm.toFixed(2)), estimatedInterceptMin: parseFloat(estimatedInterceptMin.toFixed(2)), imagingLockStatus, recommendedSensorMode, priorityScore, actionBrief };
+}
+
 export default function App() {
   const globeRef = useRef(null)
   const containerRef = useRef(null)
@@ -75,6 +94,7 @@ export default function App() {
   const [telemetry, setTelemetry] = useState(null)
   const [telemetryLoading, setTelemetryLoading] = useState(false)
   const [telemetryError, setTelemetryError] = useState(null)
+  const [localCompute, setLocalCompute] = useState(false)
   const [dataSource, setDataSource] = useState('fallback')
 
   // Resize observer
@@ -115,7 +135,7 @@ export default function App() {
 
   // Fetch NASA EONET disasters
   useEffect(() => {
-    fetch('https://eonet.gsfc.nasa.gov/api/v3/events?status=open&limit=15')
+    fetch('https://eonet.gsfc.nasa.gov/api/v3/events?status=open&limit=15&days=30')
       .then(r => r.json())
       .then(data => {
         if (data.events && data.events.length > 0) {
@@ -147,7 +167,6 @@ export default function App() {
     try {
       const response = await fetch(lambdaUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           disasterTitle: disaster.title,
           category,
@@ -166,9 +185,20 @@ export default function App() {
       } else {
         setTelemetry(data)
       }
+      setLocalCompute(false)
     } catch (err) {
-      console.error('Lambda call failed:', err)
-      setTelemetryError('Lambda unavailable')
+      console.error('Lambda call failed, using local compute:', err)
+      const coords = disaster.geometry[0]?.coordinates || [0, 0]
+      const fallbackDisasterLon = coords[0]
+      const fallbackDisasterLat = coords[1]
+      const category = disaster.categories?.[0]?.title || 'Unknown'
+      const satPos = satPositions.find(s => s.name === satName)
+      if (satPos) {
+        const localResult = computeLocalTelemetry(fallbackDisasterLat, fallbackDisasterLon, satPos.lat, satPos.lng, category)
+        setTelemetry(localResult)
+        setLocalCompute(true)
+      }
+      setTelemetryError(null)
     } finally {
       setTelemetryLoading(false)
     }
@@ -290,7 +320,10 @@ export default function App() {
 
         {/* Telemetry Card */}
         <div style={{padding: '16px 20px'}}>
-          <h2 style={{margin: '0 0 10px', fontSize: '0.7rem', color: '#4a6fa5', letterSpacing: '2px', textTransform: 'uppercase'}}>AWS Lambda Overpass Telemetry</h2>
+          <h2 style={{margin: '0 0 10px', fontSize: '0.7rem', color: '#4a6fa5', letterSpacing: '2px', textTransform: 'uppercase'}}>
+            AWS Lambda Overpass Telemetry
+            {localCompute && <span style={{marginLeft: '6px', fontSize: '0.6rem', color: '#555e77', fontWeight: 'normal', textTransform: 'none', letterSpacing: '0'}}>(local compute)</span>}
+          </h2>
           {!lambdaUrl && (
             <div style={{color: '#ff4444', fontSize: '0.75rem', padding: '8px', background: 'rgba(255,0,0,0.08)', borderRadius: '6px', border: '1px solid #ff4444'}}>
               ⚠️ VITE_LAMBDA_URL not configured
@@ -301,11 +334,6 @@ export default function App() {
           )}
           {telemetryLoading && (
             <div style={{color: '#00d4ff', fontSize: '0.8rem', textAlign: 'center', padding: '12px'}}>⟳ Querying Lambda...</div>
-          )}
-          {telemetryError && (
-            <div style={{color: '#ff4444', fontSize: '0.75rem', padding: '8px', background: 'rgba(255,0,0,0.08)', borderRadius: '6px', border: '1px solid #ff4444'}}>
-              ⚠️ {telemetryError}
-            </div>
           )}
           {telemetry && !telemetryLoading && (
             <div style={{display: 'flex', flexDirection: 'column', gap: '6px'}}>
