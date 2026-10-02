@@ -1,0 +1,5 @@
+https://d3odkk0yy3ozt5.cloudfront.net
+Bucket: orbitshield-frontend-05826453
+Distribution ID: E1NNKF3QMOBB4C
+Distribution ARN: arn:aws:cloudfront::058264536524:distribution/E1NNKF3QMOBB4C
+HTTP Status: 200
